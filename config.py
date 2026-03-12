@@ -33,8 +33,8 @@ IO_BANDWIDTH = 64       # bits/cycle
 # ==============================================================================
 # SHAKE
 # ==============================================================================
-SHAKE128_RATE = 1344    # bits
-SHAKE256_RATE = 1088    # bits
+SHAKE128_RATE = 1344    # bits = 168 bytes
+SHAKE256_RATE = 1088    # bits = 136 bytes
 SHAKE_ROUNDS = 24
 SHAKE_CYCLES_PER_ROUND = 10
 SHAKE_SQUEEZE_BW_BITS = 72   # internal output datapath for sampler side
@@ -60,19 +60,22 @@ NTT_PREPOST_CYCLES = DILITHIUM_N // NTT_TWIDDLE_MUL_PER_CYCLE
 PAU_PE_COUNT = 2
 PAU_PIPELINE_STAGES = 4
 
-
 # ==========================================
 # Hint / W1 packing / final compare
 # ==========================================
 USEHINT_PE_COUNT = 2
 USEHINT_PIPELINE_STAGES = 2
 
-# Dilithium2: w1 is 4 bits per coeff -> 256 coeff = 128 bytes per poly
-W1_BITS_PER_COEFF = 4
-W1_PACKED_BYTES_PER_POLY = (DILITHIUM_N * W1_BITS_PER_COEFF) // 8
+# Dilithium2-specific packed size:
+# polyw1_pack() outputs 192 bytes per polynomial
+W1_PACKED_BYTES_PER_POLY = 192
 
 # final challenge size (c') = 32 bytes
 FINAL_CHALLENGE_BYTES = 32
+
+# Convenience values for final hash sizing
+TOTAL_W1_PACKED_BYTES = DILITHIUM_K * W1_PACKED_BYTES_PER_POLY
+FINAL_HASH_INPUT_BYTES = CRH_BYTES + TOTAL_W1_PACKED_BYTES   # mu || packed_w1
 
 # ==============================================================================
 # Optional reporting
@@ -85,7 +88,7 @@ CLOCK_FREQUENCY_HZ = 100_000_000  # 100 MHz
 TRACE_ENABLED = True
 TRACE_MODULE_STATES = True
 TRACE_SCHEDULER = True
-
+TRACE_CYCLE_STEPS = False
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b

@@ -104,7 +104,9 @@ class DilithiumScheduler:
             f"completed_w={self.completed_w_rows}/{self.cfg.DILITHIUM_K} "
             f"packed_rows={self.packed_rows}/{self.cfg.DILITHIUM_K} "
             f"a_next={self.next_a_index}/{self.total_a_polys} "
-            f"final_hash={self.final_hash_done} compare_done={self.compare_done}"
+            f"final_hash_issued={self.final_hash_issued} "
+            f"final_hash_done={self.final_hash_done} "
+            f"compare_done={self.compare_done}"
         )
 
     # ------------------------------------------------------------------
@@ -152,6 +154,7 @@ class DilithiumScheduler:
             self._issue_pau()
             self._issue_postprocess()
             self._issue_final_hash()
+            self._maybe_start_compare()
             return
 
     # ------------------------------------------------------------------
@@ -231,8 +234,8 @@ class DilithiumScheduler:
 
         self.sim.shake.start_hash(
             mode=128,
-            input_bytes=34,
-            squeeze_blocks=5,
+            input_bytes=self.cfg.A_EXPAND_INPUT_BYTES,
+            squeeze_blocks=self.cfg.A_EXPAND_BLOCKS_PER_POLY,
             tag=tag,
         )
         self.sim.matrix_a_sampler.start_sampling(
@@ -244,7 +247,7 @@ class DilithiumScheduler:
         self.a_pair_active = True
         self.a_inflight_tag = tag
         self.next_a_index += 1
-        self._trace(f"issue A generation | row={row} col={col} squeeze_blocks=5")
+        self._trace(f"issue A generation | row={row} col={col} squeeze_blocks={self.cfg.A_EXPAND_BLOCKS_PER_POLY}")
 
     # ------------------------------------------------------------------
     # NTT issue
@@ -417,27 +420,42 @@ class DilithiumScheduler:
         self.sim.hint.start_job(row=row, tag={"row": row})
         self._trace(f"issue POST/use_hint+pack | row={row}")
 
+    # ------------------------------------------------------------------
+    # Final hash
+    # ------------------------------------------------------------------
     def _issue_final_hash(self):
         if self.final_hash_issued:
             return
         if self.sim.shake.busy:
             return
 
-        # wait until all A polys are generated and all rows are packed
+        # SHAKE becomes available immediately after A generation finishes
         if self.next_a_index < self.total_a_polys:
             return
         if self.a_pair_active:
             return
-        if self.packed_rows < self.cfg.DILITHIUM_K:
+
+        # Need mu ready before final hash can begin
+        if not self.mu_ready:
             return
 
-        # wait until NTT/PAU path is fully drained
+        # Need all NTT/PAU work logically issued so final w-path is underway
         if self.ntt_ptr < len(self.ntt_plan):
             return
         if not all(self.row_sub_done):
             return
 
-        input_bytes = self.cfg.CRH_BYTES + self.packed_w1_bytes
+        # Streaming-absorb timing approximation:
+        # Start final SHAKE as soon as SHAKE is free after A generation,
+        # without waiting for all packed rows to be ready.
+        # Input size is fixed by Dilithium2 standard:
+        #   mu (CRH_BYTES) + packed_w1 (K * 192B)
+        input_bytes = getattr(
+            self.cfg,
+            "FINAL_HASH_INPUT_BYTES",
+            self.cfg.CRH_BYTES + self.cfg.DILITHIUM_K * self.cfg.W1_PACKED_BYTES_PER_POLY,
+        )
+
         self.sim.shake.start_hash(
             mode=256,
             input_bytes=input_bytes,
@@ -445,7 +463,28 @@ class DilithiumScheduler:
             tag="c_prime",
         )
         self.final_hash_issued = True
-        self._trace(f"issue FINAL_HASH | SHAKE256(mu||packed_w1) input_bytes={input_bytes}")
+        self._trace(
+            f"issue FINAL_HASH | SHAKE256(mu||packed_w1) input_bytes={input_bytes} "
+            f"(streaming-absorb approximation)"
+        )
+
+    def _maybe_start_compare(self):
+        if self.compare_active or self.compare_done:
+            return
+
+        # Compare may start only after:
+        #   1) final hash finished
+        #   2) all packed rows finished
+        if not self.final_hash_done:
+            return
+        if self.packed_rows < self.cfg.DILITHIUM_K:
+            return
+
+        self.compare_active = True
+        self.compare_cycles_left = math.ceil(
+            (self.cfg.FINAL_CHALLENGE_BYTES * 8) / self.cfg.MEM_BANDWIDTH
+        )
+        self._trace(f"start compare | cycles={self.compare_cycles_left}")
 
     # ------------------------------------------------------------------
     # Local non-module ops
@@ -475,6 +514,7 @@ class DilithiumScheduler:
         self._retire_w_final()
         self._handle_hint_completion()
         self._handle_final_hash_completion()
+        self._maybe_start_compare()
 
     def _handle_unpack_completion(self):
         if self.phase != "PREP":
@@ -542,7 +582,8 @@ class DilithiumScheduler:
             })
 
             self._trace(
-                f"complete A generation | row={self.a_inflight_tag['row']} col={self.a_inflight_tag['col']} -> A_elem buffer"
+                f"complete A generation | row={self.a_inflight_tag['row']} "
+                f"col={self.a_inflight_tag['col']} -> A_elem buffer"
             )
 
             self.a_pair_active = False
@@ -650,7 +691,8 @@ class DilithiumScheduler:
         self.packed_rows += 1
         self.packed_w1_bytes += self.cfg.W1_PACKED_BYTES_PER_POLY
         self._trace(
-            f"complete POST/use_hint+pack | row={job['row']} | packed_rows={self.packed_rows} packed_w1_bytes={self.packed_w1_bytes}"
+            f"complete POST/use_hint+pack | row={job['row']} | "
+            f"packed_rows={self.packed_rows} packed_w1_bytes={self.packed_w1_bytes}"
         )
 
     def _handle_final_hash_completion(self):
@@ -663,8 +705,4 @@ class DilithiumScheduler:
             tag = self.sim.shake.current_job["tag"]
             if tag == "c_prime":
                 self.final_hash_done = True
-                self.compare_active = True
-                self.compare_cycles_left = math.ceil(
-                    (self.cfg.FINAL_CHALLENGE_BYTES * 8) / self.cfg.MEM_BANDWIDTH
-                )
-                self._trace(f"complete FINAL_HASH | start compare cycles={self.compare_cycles_left}")
+                self._trace("complete FINAL_HASH | c_prime ready")

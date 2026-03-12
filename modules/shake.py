@@ -1,8 +1,10 @@
 # modules/shake.py
+import math
+
 
 class ShakeModule:
     """
-    Minimal SHAKE timing model with automatic state transitions.
+    SHAKE timing model with multi-block absorb support.
 
     Main external API:
         - start_hash(mode, input_bytes, squeeze_blocks=1, tag=None)
@@ -12,12 +14,20 @@ class ShakeModule:
         - state
 
     Automatic flow:
-        ABSORB -> PERMUTE -> SQUEEZE
-        If squeeze_blocks > 1:
-            ABSORB -> (PERMUTE -> SQUEEZE) x squeeze_blocks
+        ABSORB(block 1) -> PERMUTE
+        ABSORB(block 2) -> PERMUTE
+        ...
+        ABSORB(block N) -> PERMUTE
+        SQUEEZE(block 1)
+        [PERMUTE -> SQUEEZE(block 2)] ...
+        [PERMUTE -> SQUEEZE(block M)]
 
-    Notes:
-    - This is only a cycle model, not a functional Keccak implementation.
+    Notes
+    -----
+    - This is still a timing model, not a functional Keccak implementation.
+    - For long inputs, absorb is split into rate-sized blocks.
+    - Each absorb block is followed by one permutation.
+    - If squeeze_blocks > 1, additional squeeze blocks require extra permutations.
     - Sampler overlap is modeled outside this module:
         sampler.tick(...) should only advance while self.state == "SQUEEZE".
     """
@@ -35,6 +45,10 @@ class ShakeModule:
 
         self.squeeze_blocks_total = 0
         self.squeeze_blocks_done = 0
+
+        self.absorb_blocks_total = 0
+        self.absorb_block_index = 0  # 0-based
+        self.input_bytes_total = 0
 
         self._cycle_getter = None
 
@@ -71,10 +85,13 @@ class ShakeModule:
             return self.config.SHAKE256_RATE
         raise ValueError("Unsupported SHAKE mode. Use 128 or 256.")
 
-    def _absorb_cycles(self, input_bytes: int) -> int:
-        input_bits = input_bytes * 8
+    def _get_rate_bytes(self, mode: int) -> int:
+        return self._get_rate_bits(mode) // 8
+
+    def _absorb_cycles_for_bytes(self, num_bytes: int) -> int:
+        num_bits = num_bytes * 8
         bw_bits = self.config.MEM_BANDWIDTH
-        return (input_bits + bw_bits - 1) // bw_bits
+        return (num_bits + bw_bits - 1) // bw_bits
 
     def _permute_cycles(self) -> int:
         return self.config.SHAKE_ROUNDS * self.config.SHAKE_CYCLES_PER_ROUND
@@ -84,12 +101,32 @@ class ShakeModule:
         bw_bits = self.config.SHAKE_SQUEEZE_BW_BITS
         return (rate_bits + bw_bits - 1) // bw_bits
 
-    def _enter_absorb(self, input_bytes: int):
+    def _compute_absorb_blocks(self, mode: int, input_bytes: int) -> int:
+        rate_bytes = self._get_rate_bytes(mode)
+        # Even empty input would still require one padded absorb block in a real sponge.
+        return max(1, math.ceil(input_bytes / rate_bytes))
+
+    def _current_absorb_block_bytes(self, mode: int) -> int:
+        """
+        Bytes carried by the current absorb block.
+        For the last block this may be partial.
+        """
+        rate_bytes = self._get_rate_bytes(mode)
+        start = self.absorb_block_index * rate_bytes
+        remaining = max(0, self.input_bytes_total - start)
+        if remaining <= 0:
+            # padding-only block for empty input corner case
+            return 0
+        return min(rate_bytes, remaining)
+
+    def _enter_absorb_current_block(self, mode: int):
         old = self.state
+        block_bytes = self._current_absorb_block_bytes(mode)
         self.state = "ABSORB"
-        self.state_cycles_left = self._absorb_cycles(input_bytes)
+        self.state_cycles_left = self._absorb_cycles_for_bytes(block_bytes)
         self._trace(
-            f"{old} -> ABSORB | cycles={self.state_cycles_left} input_bytes={input_bytes}"
+            f"{old} -> ABSORB | block={self.absorb_block_index + 1}/{self.absorb_blocks_total} "
+            f"bytes={block_bytes} cycles={self.state_cycles_left}"
         )
 
     def _enter_permute(self):
@@ -105,7 +142,8 @@ class ShakeModule:
         self.state = "SQUEEZE"
         self.state_cycles_left = self._squeeze_cycles_per_block(mode)
         self._trace(
-            f"{old} -> SQUEEZE | block={self.squeeze_blocks_done + 1}/{self.squeeze_blocks_total} cycles={self.state_cycles_left}"
+            f"{old} -> SQUEEZE | block={self.squeeze_blocks_done + 1}/{self.squeeze_blocks_total} "
+            f"cycles={self.state_cycles_left}"
         )
 
     # ------------------------------------------------------------------
@@ -128,23 +166,34 @@ class ShakeModule:
 
         self.cycle_count = 0
         self.done_pulse = False
+
+        self.input_bytes_total = input_bytes
+        self.absorb_blocks_total = self._compute_absorb_blocks(mode, input_bytes)
+        self.absorb_block_index = 0
+
         self.squeeze_blocks_total = squeeze_blocks
         self.squeeze_blocks_done = 0
 
         self._trace(
-            f"start_hash | mode=SHAKE{mode} input_bytes={input_bytes} squeeze_blocks={squeeze_blocks} tag={tag}"
+            f"start_hash | mode=SHAKE{mode} input_bytes={input_bytes} "
+            f"absorb_blocks={self.absorb_blocks_total} squeeze_blocks={squeeze_blocks} tag={tag}"
         )
-        self._enter_absorb(input_bytes)
+        self._enter_absorb_current_block(mode)
 
     def estimate_cycles(self, mode=128, input_bytes=0, squeeze_blocks=1) -> int:
         if squeeze_blocks <= 0:
             raise ValueError("squeeze_blocks must be >= 1")
 
-        absorb = self._absorb_cycles(input_bytes)
-        permute = self._permute_cycles()
-        squeeze = self._squeeze_cycles_per_block(mode)
+        absorb_blocks = self._compute_absorb_blocks(mode, input_bytes)
+        absorb_transfer_cycles = self._absorb_cycles_for_bytes(input_bytes)
 
-        return absorb + squeeze_blocks * (permute + squeeze)
+        permute_cycles_total = (
+            absorb_blocks + (squeeze_blocks - 1)
+        ) * self._permute_cycles()
+
+        squeeze_cycles_total = squeeze_blocks * self._squeeze_cycles_per_block(mode)
+
+        return absorb_transfer_cycles + permute_cycles_total + squeeze_cycles_total
 
     # ------------------------------------------------------------------
     # Optional manual API for debugging
@@ -163,11 +212,15 @@ class ShakeModule:
         }
         self.cycle_count = 0
         self.done_pulse = False
+
+        self.input_bytes_total = input_bytes
+        self.absorb_blocks_total = 1
+        self.absorb_block_index = 0
         self.squeeze_blocks_total = 0
         self.squeeze_blocks_done = 0
 
         self._trace(f"start_absorb | mode=SHAKE{mode} input_bytes={input_bytes}")
-        self._enter_absorb(input_bytes)
+        self._enter_absorb_current_block(mode)
 
     def start_permute(self):
         if self.busy:
@@ -182,6 +235,8 @@ class ShakeModule:
         }
         self.cycle_count = 0
         self.done_pulse = False
+        self.absorb_blocks_total = 0
+        self.absorb_block_index = 0
         self.squeeze_blocks_total = 0
         self.squeeze_blocks_done = 0
 
@@ -202,6 +257,8 @@ class ShakeModule:
         }
         self.cycle_count = 0
         self.done_pulse = False
+        self.absorb_blocks_total = 0
+        self.absorb_block_index = 0
         self.squeeze_blocks_total = 1
         self.squeeze_blocks_done = 0
 
@@ -251,6 +308,13 @@ class ShakeModule:
             return
 
         if self.state == "PERMUTE":
+            # If not all absorb blocks have been processed yet, go to next absorb block.
+            if self.absorb_block_index + 1 < self.absorb_blocks_total:
+                self.absorb_block_index += 1
+                self._enter_absorb_current_block(mode)
+                return
+
+            # Otherwise, go to squeeze phase.
             self._enter_squeeze(mode)
             return
 
@@ -281,6 +345,8 @@ class ShakeModule:
             "state_cycles_left": self.state_cycles_left,
             "done_pulse": self.done_pulse,
             "current_rate_bits": self.current_rate_bits,
+            "absorb_blocks_total": self.absorb_blocks_total,
+            "absorb_block_index": self.absorb_block_index,
             "squeeze_blocks_total": self.squeeze_blocks_total,
             "squeeze_blocks_done": self.squeeze_blocks_done,
             "current_job": self.current_job,
@@ -297,6 +363,8 @@ if __name__ == "__main__":
     shake = ShakeModule(config)
 
     print("=== SHAKE Test ===")
+
+    # A polynomial generation example
     est = shake.estimate_cycles(mode=128, input_bytes=34, squeeze_blocks=5)
     print(f"Estimated SHAKE128(A poly): {est} cycles")
 
@@ -304,3 +372,14 @@ if __name__ == "__main__":
     while shake.busy:
         shake.tick()
     print(f"Actual cycles: {shake.cycle_count}")
+
+    # Final challenge example for Dilithium2:
+    # mu(64B) + packed w1 (4 * 192B) = 832B
+    final_input = 64 + 4 * 192
+    est_final = shake.estimate_cycles(mode=256, input_bytes=final_input, squeeze_blocks=1)
+    print(f"Estimated SHAKE256(mu||w1): {est_final} cycles")
+
+    shake.start_hash(mode=256, input_bytes=final_input, squeeze_blocks=1, tag="c_prime")
+    while shake.busy:
+        shake.tick()
+    print(f"Actual final SHAKE cycles: {shake.cycle_count}")
