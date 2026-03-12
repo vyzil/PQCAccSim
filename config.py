@@ -1,62 +1,91 @@
+# config.py
 import math
 
-# ==========================================
-# PQC (CRYSTALS-Dilithium) Parameters
-# ==========================================
-DILITHIUM_Q = 8380417
+# ==============================================================================
+# Dilithium2 Parameters
+# ==============================================================================
 DILITHIUM_N = 256
+DILITHIUM_Q = 8380417
 DILITHIUM_K = 4
 DILITHIUM_L = 4
 DILITHIUM_TAU = 39
 DILITHIUM_OMEGA = 80
 
+# Bit widths used for rough unpack/pack modeling
+DILITHIUM_T1_BITS = 10
+DILITHIUM_Z_BITS = 18
+
+# Common byte sizes
+SEED_BYTES = 32
+CRH_BYTES = 64
+
+# Approximate Dilithium2 object sizes
+PK_BYTES = 1312
+SIG_BYTES = 2420
+MSG_BYTES = 32
+
+# ==============================================================================
+# Memory / I/O
+# ==============================================================================
+MEM_BANDWIDTH = 64      # bits/cycle
+IO_BANDWIDTH = 64       # bits/cycle
+
+# ==============================================================================
+# SHAKE
+# ==============================================================================
+SHAKE128_RATE = 1344    # bits
+SHAKE256_RATE = 1088    # bits
+SHAKE_ROUNDS = 24
+SHAKE_CYCLES_PER_ROUND = 10
+SHAKE_SQUEEZE_BW_BITS = 72   # internal output datapath for sampler side
+
+# For A expansion
+A_EXPAND_INPUT_BYTES = 34
+A_EXPAND_BLOCKS_PER_POLY = 5
+
 # ==========================================
 # NTT Module Parameters
 # ==========================================
-NTT_TOTAL_STAGES = int(math.log2(DILITHIUM_N))
-NTT_STAGES_PER_PASS = 2
-NTT_PASSES = NTT_TOTAL_STAGES // NTT_STAGES_PER_PASS
+NTT_TOTAL_STAGES = int(math.log2(DILITHIUM_N))   # 8
+NTT_BU_COUNT = 2                                 # 2 butterfly ops / cycle
+NTT_COEFF_FETCH_PER_CYCLE = 2                    # dual-port memory
+NTT_TWIDDLE_MUL_PER_CYCLE = 2                    # 2 coeff pre/post mul per cycle
 
-NTT_CHUNK_SIZE = 4      # Number of data processed in one pipeline chunk
-NTT_CHUNK_CYCLES = 2    # Cycles taken to process one chunk (Stage1 + Stage2)
-NTT_DATA_FETCH = 2      # Number of data items fetched per cycle for NTT processing
+NTT_CORE_CYCLES = (DILITHIUM_N // 2) * NTT_TOTAL_STAGES // NTT_BU_COUNT
+NTT_PREPOST_CYCLES = DILITHIUM_N // NTT_TWIDDLE_MUL_PER_CYCLE
 
-NTT_BU_COUNT = 2
-
-# ==========================================
-# SHAKE Module Parameters
-# ==========================================
-SHAKE_STATE_BITS = 1600
-SHAKE_DATAPATH_BITS = 320
-SHAKE_ROUNDS = 24
-
-SHAKE_STEPS_PER_ROUND = 2
-SHAKE_CYCLES_PER_STEP = SHAKE_STATE_BITS // SHAKE_DATAPATH_BITS 
-
-SHAKE128_RATE = 1344
-SHAKE256_RATE = 1088 
-
-# ==========================================
-# Sampler Module Parameters
-# ==========================================
-SAMPLER_MAX_REJECT_CYCLES = 128
+# ==============================================================================
+# PAU
+# ==============================================================================
+PAU_PE_COUNT = 2
+PAU_PIPELINE_STAGES = 4
 
 
 # ==========================================
-# PAU (Polynomial Arithmetic Unit) Parameters
+# Hint / W1 packing / final compare
 # ==========================================
-PAU_PE_COUNT = 2           # 1사이클에 처리할 계수(Coefficient)의 개수
-PAU_PIPELINE_STAGES = 3    # Fetch -> Execute(Mul/Add/Shift/Hint) -> Writeback
+USEHINT_PE_COUNT = 2
+USEHINT_PIPELINE_STAGES = 2
 
-# ==========================================
-# Data Bit-widths for Packing/Unpacking
-# ==========================================
-DILITHIUM_T1_BITS = 10
-DILITHIUM_Z_BITS  = 20
-SEED_BYTES        = 32
+# Dilithium2: w1 is 4 bits per coeff -> 256 coeff = 128 bytes per poly
+W1_BITS_PER_COEFF = 4
+W1_PACKED_BYTES_PER_POLY = (DILITHIUM_N * W1_BITS_PER_COEFF) // 8
 
-# ==========================================
-# Bandwidth Parameters
-# ==========================================
-MEM_BANDWIDTH = 64
-IO_BANDWIDTH = 32
+# final challenge size (c') = 32 bytes
+FINAL_CHALLENGE_BYTES = 32
+
+# ==============================================================================
+# Optional reporting
+# ==============================================================================
+CLOCK_FREQUENCY_HZ = 100_000_000  # 100 MHz
+
+# ------------------------------------------
+# Debug / Trace
+# ------------------------------------------
+TRACE_ENABLED = True
+TRACE_MODULE_STATES = True
+TRACE_SCHEDULER = True
+
+
+def ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b

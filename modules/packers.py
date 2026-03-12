@@ -1,91 +1,245 @@
+# modules/packers.py
 import math
 
+
 class PkUnpackerModule:
-    """ 
-    Dedicated hardware block for fetching and unpacking the Public Key.
-    Interfaces with the fast internal memory (e.g., Secure ROM/SRAM).
     """
+    Reads pk from memory and unpacks it into local usable form.
+    """
+
     def __init__(self, config):
         self.config = config
         self.state = "IDLE"
+        self.cycles_left = 0
         self.cycle_count = 0
-        self.state_cycles_left = 0
+        self.done_pulse = False
+        self.current_job = None
 
-    def start_unpack(self):
-        self.cycle_count = 0
-        self.state = "UNPACK_PK"
-        
-        rho_bits = self.config.SEED_BYTES * 8
-        t1_bits = (self.config.DILITHIUM_K * self.config.DILITHIUM_N * self.config.DILITHIUM_T1_BITS)
-        total_bits = rho_bits + t1_bits
-        
-        self.state_cycles_left = math.ceil(total_bits / self.config.MEM_BANDWIDTH)
+        self._cycle_getter = None
 
-    def tick(self):
-        if self.state == "IDLE":
+    @property
+    def busy(self) -> bool:
+        return self.state != "IDLE"
+
+    # ------------------------------------------------------------------
+    # Trace helpers
+    # ------------------------------------------------------------------
+    def set_cycle_getter(self, fn):
+        self._cycle_getter = fn
+
+    def _now(self):
+        if self._cycle_getter is None:
+            return -1
+        return self._cycle_getter()
+
+    def _trace_enabled(self) -> bool:
+        return getattr(self.config, "TRACE_ENABLED", False) and getattr(self.config, "TRACE_MODULE_STATES", False)
+
+    def _trace(self, msg: str):
+        if not self._trace_enabled():
             return
+        print(f"[cycle {self._now():7d}] [PkUnpacker      ] {msg}")
+
+    # ------------------------------------------------------------------
+    # Timing model
+    # ------------------------------------------------------------------
+    def start_unpack(self, num_bytes: int = None) -> None:
+        if self.busy:
+            raise RuntimeError("PkUnpackerModule is busy")
+
+        num_bytes = num_bytes or self.config.PK_BYTES
+        num_bits = num_bytes * 8
+
+        self.current_job = {
+            "type": "unpack_pk",
+            "num_bytes": num_bytes,
+        }
+        self.cycles_left = math.ceil(num_bits / self.config.MEM_BANDWIDTH)
+        self.cycle_count = 0
+        self.done_pulse = False
+        self.state = "BUSY"
+
+        self._trace(
+            f"IDLE -> BUSY | unpack_pk bytes={num_bytes} cycles={self.cycles_left}"
+        )
+
+    def tick(self) -> None:
+        self.done_pulse = False
+        if not self.busy:
+            return
+
         self.cycle_count += 1
-        self.state_cycles_left -= 1
-        if self.state_cycles_left <= 0:
+        self.cycles_left -= 1
+        if self.cycles_left <= 0:
+            total_cycles = self.cycle_count
+            num_bytes = None if self.current_job is None else self.current_job["num_bytes"]
+
             self.state = "IDLE"
+            self.done_pulse = True
+
+            self._trace(
+                f"BUSY -> IDLE | done unpack_pk bytes={num_bytes} total_cycles={total_cycles}"
+            )
 
 
 class SigUnpackerModule:
-    """ 
-    Dedicated hardware block for fetching and unpacking the Signature.
-    Interfaces with the slow external I/O (e.g., JTAG Mailbox or SPI).
     """
+    Reads signature from memory and unpacks it into local usable form.
+    """
+
     def __init__(self, config):
         self.config = config
         self.state = "IDLE"
+        self.cycles_left = 0
         self.cycle_count = 0
-        self.state_cycles_left = 0
+        self.done_pulse = False
+        self.current_job = None
 
-    def start_unpack(self):
-        self.cycle_count = 0
-        self.state = "UNPACK_SIG"
-        
-        c_tilde_bits = self.config.SEED_BYTES * 8
-        z_bits = (self.config.DILITHIUM_L * self.config.DILITHIUM_N * self.config.DILITHIUM_Z_BITS)
-        hint_bytes = self.config.DILITHIUM_OMEGA + self.config.DILITHIUM_K
-        hint_bits = hint_bytes * 8
-        total_bits = c_tilde_bits + z_bits + hint_bits
-        
-        self.state_cycles_left = math.ceil(total_bits / self.config.IO_BANDWIDTH)
+        self._cycle_getter = None
 
-    def tick(self):
-        if self.state == "IDLE":
+    @property
+    def busy(self) -> bool:
+        return self.state != "IDLE"
+
+    # ------------------------------------------------------------------
+    # Trace helpers
+    # ------------------------------------------------------------------
+    def set_cycle_getter(self, fn):
+        self._cycle_getter = fn
+
+    def _now(self):
+        if self._cycle_getter is None:
+            return -1
+        return self._cycle_getter()
+
+    def _trace_enabled(self) -> bool:
+        return getattr(self.config, "TRACE_ENABLED", False) and getattr(self.config, "TRACE_MODULE_STATES", False)
+
+    def _trace(self, msg: str):
+        if not self._trace_enabled():
             return
+        print(f"[cycle {self._now():7d}] [SigUnpacker     ] {msg}")
+
+    # ------------------------------------------------------------------
+    # Timing model
+    # ------------------------------------------------------------------
+    def start_unpack(self, num_bytes: int = None) -> None:
+        if self.busy:
+            raise RuntimeError("SigUnpackerModule is busy")
+
+        num_bytes = num_bytes or self.config.SIG_BYTES
+        num_bits = num_bytes * 8
+
+        self.current_job = {
+            "type": "unpack_sig",
+            "num_bytes": num_bytes,
+        }
+        self.cycles_left = math.ceil(num_bits / self.config.IO_BANDWIDTH)
+        self.cycle_count = 0
+        self.done_pulse = False
+        self.state = "BUSY"
+
+        self._trace(
+            f"IDLE -> BUSY | unpack_sig bytes={num_bytes} cycles={self.cycles_left}"
+        )
+
+    def tick(self) -> None:
+        self.done_pulse = False
+        if not self.busy:
+            return
+
         self.cycle_count += 1
-        self.state_cycles_left -= 1
-        if self.state_cycles_left <= 0:
+        self.cycles_left -= 1
+        if self.cycles_left <= 0:
+            total_cycles = self.cycle_count
+            num_bytes = None if self.current_job is None else self.current_job["num_bytes"]
+
             self.state = "IDLE"
+            self.done_pulse = True
+
+            self._trace(
+                f"BUSY -> IDLE | done unpack_sig bytes={num_bytes} total_cycles={total_cycles}"
+            )
 
 
 class PackerModule:
-    """ 
-    Generic hardware block for packing data back into memory 
-    or preparing data for output.
     """
+    Generic output packer.
+    Not critical for current verification flow, but useful for later extension.
+    """
+
     def __init__(self, config):
         self.config = config
         self.state = "IDLE"
+        self.cycles_left = 0
         self.cycle_count = 0
-        self.state_cycles_left = 0
+        self.done_pulse = False
+        self.current_job = None
 
-    def start_pack(self, num_bits):
-        self.cycle_count = 0
-        self.state = "PACK_GENERIC"
-        # Assuming packing writes to internal memory
-        self.state_cycles_left = math.ceil(num_bits / self.config.MEM_BANDWIDTH)
+        self._cycle_getter = None
 
-    def tick(self):
-        if self.state == "IDLE":
+    @property
+    def busy(self) -> bool:
+        return self.state != "IDLE"
+
+    # ------------------------------------------------------------------
+    # Trace helpers
+    # ------------------------------------------------------------------
+    def set_cycle_getter(self, fn):
+        self._cycle_getter = fn
+
+    def _now(self):
+        if self._cycle_getter is None:
+            return -1
+        return self._cycle_getter()
+
+    def _trace_enabled(self) -> bool:
+        return getattr(self.config, "TRACE_ENABLED", False) and getattr(self.config, "TRACE_MODULE_STATES", False)
+
+    def _trace(self, msg: str):
+        if not self._trace_enabled():
             return
+        print(f"[cycle {self._now():7d}] [PackerModule    ] {msg}")
+
+    # ------------------------------------------------------------------
+    # Timing model
+    # ------------------------------------------------------------------
+    def start_pack(self, num_bits: int, tag=None) -> None:
+        if self.busy:
+            raise RuntimeError("PackerModule is busy")
+
+        self.current_job = {
+            "type": "pack",
+            "num_bits": num_bits,
+            "tag": tag,
+        }
+        self.cycles_left = math.ceil(num_bits / self.config.MEM_BANDWIDTH)
+        self.cycle_count = 0
+        self.done_pulse = False
+        self.state = "BUSY"
+
+        self._trace(
+            f"IDLE -> BUSY | pack bits={num_bits} cycles={self.cycles_left} tag={tag}"
+        )
+
+    def tick(self) -> None:
+        self.done_pulse = False
+        if not self.busy:
+            return
+
         self.cycle_count += 1
-        self.state_cycles_left -= 1
-        if self.state_cycles_left <= 0:
+        self.cycles_left -= 1
+        if self.cycles_left <= 0:
+            total_cycles = self.cycle_count
+            num_bits = None if self.current_job is None else self.current_job["num_bits"]
+            tag = None if self.current_job is None else self.current_job["tag"]
+
             self.state = "IDLE"
+            self.done_pulse = True
+
+            self._trace(
+                f"BUSY -> IDLE | done pack bits={num_bits} total_cycles={total_cycles} tag={tag}"
+            )
 
 
 if __name__ == "__main__":
@@ -93,26 +247,27 @@ if __name__ == "__main__":
     import os
 
     ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, ROOT_DIR)
-    
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
+
     import config
 
-    print("=== Isolated Unpacker/Packer Modules Test ===")
-    
-    pk_unpacker = PkUnpackerModule(config)
-    pk_unpacker.start_unpack()
-    while pk_unpacker.state != "IDLE":
-        pk_unpacker.tick()
-    print(f"PK Unpacker Cycles: {pk_unpacker.cycle_count}")
-    
-    sig_unpacker = SigUnpackerModule(config)
-    sig_unpacker.start_unpack()
-    while sig_unpacker.state != "IDLE":
-        sig_unpacker.tick()
-    print(f"Signature Unpacker Cycles: {sig_unpacker.cycle_count}")
-    
-    packer = PackerModule(config)
-    packer.start_pack(num_bits=1024)
-    while packer.state != "IDLE":
-        packer.tick()
-    print(f"Generic Packer Cycles (1024 bits): {packer.cycle_count}")
+    print("=== Pack/Unpack Test ===")
+
+    pk = PkUnpackerModule(config)
+    pk.start_unpack()
+    while pk.busy:
+        pk.tick()
+    print(f"PK unpack cycles   : {pk.cycle_count}")
+
+    sig = SigUnpackerModule(config)
+    sig.start_unpack()
+    while sig.busy:
+        sig.tick()
+    print(f"SIG unpack cycles  : {sig.cycle_count}")
+
+    pack = PackerModule(config)
+    pack.start_pack(num_bits=1024, tag="dummy")
+    while pack.busy:
+        pack.tick()
+    print(f"Generic pack cycles: {pack.cycle_count}")

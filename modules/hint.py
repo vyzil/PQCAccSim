@@ -1,15 +1,22 @@
-# modules/pau.py
-class PolyArithmeticUnit:
+# modules/hint.py
+import math
+
+
+class HintPackModule:
     """
-    Supported jobs:
-      - mac_add_first : first partial sum for one row
-      - mac_add_acc   : accumulate onto existing partial sum
-      - mac_sub       : w_ntt - c_ntt * t1_ntt
-      - hint          : reserved for future
+    Row-wise post-processing after inverse NTT.
+
+    One job corresponds to:
+      1) use_hint on one polynomial row
+      2) extract w1 (high bits)
+      3) pack w1 and store
+
+    This is a timing model only.
     """
 
     def __init__(self, config):
         self.config = config
+
         self.state = "IDLE"
         self.cycles_left = 0
         self.cycle_count = 0
@@ -39,38 +46,41 @@ class PolyArithmeticUnit:
     def _trace(self, msg: str):
         if not self._trace_enabled():
             return
-        print(f"[cycle {self._now():7d}] [PAU             ] {msg}")
+        print(f"[cycle {self._now():7d}] [HintPackModule  ] {msg}")
 
     # ------------------------------------------------------------------
     # Timing model
     # ------------------------------------------------------------------
-    def estimate_cycles(self, op: str) -> int:
-        if op not in {"mac_add_first", "mac_add_acc", "mac_sub", "hint"}:
-            raise ValueError(f"Unsupported PAU op: {op}")
+    def estimate_cycles(self) -> int:
+        # use_hint + extract highbits
+        logic_cycles = math.ceil(self.config.DILITHIUM_N / self.config.USEHINT_PE_COUNT)
+        logic_cycles += self.config.USEHINT_PIPELINE_STAGES
 
-        poly_cycles = self.config.DILITHIUM_N // self.config.PAU_PE_COUNT
-        return poly_cycles + self.config.PAU_PIPELINE_STAGES
+        # pack w1 into memory/buffer
+        pack_bits = self.config.W1_PACKED_BYTES_PER_POLY * 8
+        pack_cycles = math.ceil(pack_bits / self.config.MEM_BANDWIDTH)
 
-    def start_job(self, op: str, row: int, col=None, meta=None) -> None:
+        return logic_cycles + pack_cycles
+
+    def start_job(self, row: int, tag=None):
         if self.busy:
-            raise RuntimeError("PAU is busy")
+            raise RuntimeError("HintPackModule is busy")
 
         self.current_job = {
-            "op": op,
+            "type": "hint_pack",
             "row": row,
-            "col": col,
-            "meta": meta or {},
+            "tag": tag,
         }
-        self.cycles_left = self.estimate_cycles(op)
+        self.cycles_left = self.estimate_cycles()
         self.cycle_count = 0
         self.done_pulse = False
         self.state = "BUSY"
 
         self._trace(
-            f"IDLE -> BUSY | op={op} row={row} col={col} cycles={self.cycles_left}"
+            f"IDLE -> BUSY | row={row} cycles={self.cycles_left} tag={tag}"
         )
 
-    def tick(self) -> None:
+    def tick(self):
         self.done_pulse = False
         if not self.busy:
             return
@@ -79,22 +89,20 @@ class PolyArithmeticUnit:
         self.cycles_left -= 1
 
         if self.cycles_left <= 0:
-            op = None if self.current_job is None else self.current_job["op"]
             row = None if self.current_job is None else self.current_job["row"]
-            col = None if self.current_job is None else self.current_job["col"]
             total_cycles = self.cycle_count
 
             self.state = "IDLE"
             self.done_pulse = True
 
             self._trace(
-                f"BUSY -> IDLE | done op={op} row={row} col={col} total_cycles={total_cycles}"
+                f"BUSY -> IDLE | done row={row} total_cycles={total_cycles}"
             )
 
 
 if __name__ == "__main__":
-    import sys
     import os
+    import sys
 
     ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if ROOT_DIR not in sys.path:
@@ -102,11 +110,9 @@ if __name__ == "__main__":
 
     import config
 
-    pau = PolyArithmeticUnit(config)
+    h = HintPackModule(config)
+    h.start_job(row=0)
+    while h.busy:
+        h.tick()
 
-    print("=== PAU Module Test ===")
-    for op in ["mac_add_first", "mac_add_acc", "mac_sub", "hint"]:
-        pau.start_job(op=op, row=0, col=0)
-        while pau.busy:
-            pau.tick()
-        print(f"{op:14s}: {pau.cycle_count} cycles")
+    print("HintPack cycles:", h.cycle_count)
