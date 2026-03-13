@@ -1,13 +1,59 @@
 import re
 import math
+import argparse
 from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference, Series
 
-LOG_PATH = Path("result.log")
-OUT_PATH = Path("module_timeline.xlsx")
+def resolve_paths():
+    parser = argparse.ArgumentParser(description="Build timeline workbook from simulator trace log")
+    parser.add_argument(
+        "--log",
+        default=None,
+        help="Input log path (default: auto by --level, else result.log)",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Output xlsx path (default: derived from log/level)",
+    )
+    parser.add_argument(
+        "--level",
+        default=None,
+        choices=["default", "2", "3", "5"],
+        help="Optional mode hint used for default naming",
+    )
+    args = parser.parse_args()
+
+    if args.log:
+        log_path = Path(args.log)
+    elif args.level is not None:
+        tag = f"d{args.level}" if args.level in {"2", "3", "5"} else "default"
+        log_path = Path(f"result_{tag}.log")
+    else:
+        log_path = Path("result.log")
+
+    if not log_path.is_absolute() and not log_path.exists():
+        alt = Path("result") / log_path
+        if alt.exists():
+            log_path = alt
+
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        stem = log_path.stem
+        suffix = stem[len("result_"):] if stem.startswith("result_") else stem
+        if suffix in {"result", ""}:
+            out_path = Path("module_timeline.xlsx")
+        else:
+            out_path = Path(f"module_timeline_{suffix}.xlsx")
+
+    return log_path, out_path
+
+
+LOG_PATH, OUT_PATH = resolve_paths()
 
 if not LOG_PATH.exists():
     raise FileNotFoundError(f"{LOG_PATH} not found")
@@ -205,6 +251,17 @@ with LOG_PATH.open("r", encoding="utf-8") as f:
             msg = m.group(3).strip()
             events.append((cycle, module, msg))
 
+# Stable module order from Events tab (first appearance)
+event_modules = list(dict.fromkeys(module for _, module, _ in events))
+colors = [
+    "5B9BD5", "ED7D31", "70AD47", "FFC000", "4472C4",
+    "A5A5A5", "C00000", "00B0F0", "92D050", "7030A0"
+]
+module_fills = {
+    m: PatternFill("solid", fgColor=colors[i % len(colors)])
+    for i, m in enumerate(event_modules)
+}
+
 # Build intervals from state transitions
 intervals = []
 active = {}
@@ -239,6 +296,13 @@ ws_events.title = "Events"
 ws_events.append(["Cycle", "Module", "Message"])
 for row in events:
     ws_events.append(list(row))
+
+# Color event rows by module
+for r in range(2, ws_events.max_row + 1):
+    module = ws_events.cell(row=r, column=2).value
+    fill = module_fills.get(module)
+    if fill:
+        ws_events.cell(row=r, column=2).fill = fill
 
 for cell in ws_events[1]:
     cell.font = Font(bold=True)
@@ -284,7 +348,7 @@ ws_sum["B4"] = len(intervals)
 ws_sum["A5"] = "Last logged cycle"
 ws_sum["B5"] = last_cycle
 ws_sum["A7"] = "Note"
-ws_sum["B7"] = "Chart uses module state transitions from result/result.log."
+ws_sum["B7"] = f"Chart uses module state transitions from {LOG_PATH}."
 
 ws_g = wb.create_sheet("GanttData")
 ws_g.append(["Task", "Start", "Duration", "Module", "Label"])
@@ -346,14 +410,11 @@ for cell in ws_grid[2]:
     cell.alignment = Alignment(horizontal="center")
 
 modules = sorted(set(module for module, *_ in intervals))
-colors = [
-    "5B9BD5", "ED7D31", "70AD47", "FFC000", "4472C4",
-    "A5A5A5", "C00000", "00B0F0", "92D050", "7030A0"
-]
-fills = {m: PatternFill("solid", fgColor=colors[i % len(colors)]) for i, m in enumerate(modules)}
+modules = event_modules
 
 for r, module in enumerate(modules, start=3):
     ws_grid.cell(row=r, column=1, value=module)
+    ws_grid.cell(row=r, column=1).fill = module_fills[module]
 
     for m, start, duration, _, _, label in intervals:
         if m != module:
@@ -365,7 +426,7 @@ for r, module in enumerate(modules, start=3):
 
         for b in range(start_bin, end_bin + 1):
             c = ws_grid.cell(row=r, column=b + 2)
-            c.fill = fills[module]
+            c.fill = module_fills[module]
 
             if c.value is None:
                 c.value = label

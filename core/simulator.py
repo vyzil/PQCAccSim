@@ -8,7 +8,12 @@ if ROOT_DIR not in sys.path:
 
 import config
 from core.memory import MemorySystem
-from core.scheduler import DilithiumScheduler
+from core.scheduler import (
+    DilithiumScheduler,
+    Dilithium2Scheduler,
+    Dilithium3Scheduler,
+    Dilithium5Scheduler,
+)
 from modules.hint import HintPackModule
 from modules.ntt import NTTModule
 from modules.packers import PackerModule, PkUnpackerModule, SigUnpackerModule
@@ -19,7 +24,26 @@ from trace_utils import trace_print
 
 
 class DilithiumVerifierSimulator:
-    def __init__(self, message_bytes=None):
+    def __init__(self, message_bytes=None, scheduler_cls=None):
+        if scheduler_cls is None:
+            level = getattr(config, "DILITHIUM_LEVEL", None)
+            if level == 2:
+                scheduler_cls = Dilithium2Scheduler
+            elif level == 3:
+                scheduler_cls = Dilithium3Scheduler
+            elif level == 5:
+                scheduler_cls = Dilithium5Scheduler
+            else:
+                scheduler_cls = DilithiumScheduler
+
+        # Keep config parameters synchronized with scheduler selection.
+        if scheduler_cls is Dilithium2Scheduler:
+            config.set_dilithium_level(2)
+        elif scheduler_cls is Dilithium3Scheduler:
+            config.set_dilithium_level(3)
+        elif scheduler_cls is Dilithium5Scheduler:
+            config.set_dilithium_level(5)
+
         self.config = config
         self.memory = MemorySystem(config, message_bytes=message_bytes)
 
@@ -38,7 +62,7 @@ class DilithiumVerifierSimulator:
         self.packer = PackerModule(config)
 
         self.global_cycle = 0
-        self.scheduler = DilithiumScheduler(self)
+        self.scheduler = scheduler_cls(self)
 
         # ------------------------------------------------------------
         # Give modules access to current cycle for internal trace logs

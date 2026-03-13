@@ -112,29 +112,46 @@ class DilithiumScheduler:
     # ------------------------------------------------------------------
     # NTT plan
     # ------------------------------------------------------------------
+    def _interleave_row_ntt_tasks(self, z_tasks, extra_tasks):
+        """
+        Interleave non-z NTT tasks between z-NTT tasks.
+
+        Design intent:
+          - z-NTT tasks track A element production/consumption.
+          - Insert up to two "extra" NTT tasks (c/t1/inv) between early z tasks,
+            so one A production window can hide roughly two NTT runs.
+        """
+        row_plan = []
+        extras = list(extra_tasks)
+
+        for i, z_task in enumerate(z_tasks):
+            row_plan.append(z_task)
+            if i < len(extras):
+                row_plan.append(extras[i])
+
+        if len(extras) > len(z_tasks):
+            row_plan.extend(extras[len(z_tasks):])
+
+        return row_plan
+
     def _build_ntt_plan(self):
         plan = []
 
-        # Row 0
-        plan.extend([
-            {"op": "fwd", "src_kind": "z",  "poly": 0, "dst": "z_ntt"},
-            {"op": "fwd", "src_kind": "c",  "poly": None, "dst": "c_ntt"},
-            {"op": "fwd", "src_kind": "z",  "poly": 1, "dst": "z_ntt"},
-            {"op": "fwd", "src_kind": "t1", "poly": 0, "dst": "t1_ntt"},
-            {"op": "fwd", "src_kind": "z",  "poly": 2, "dst": "z_ntt"},
-            {"op": "fwd", "src_kind": "z",  "poly": 3, "dst": "z_ntt"},
-        ])
+        for row in range(self.cfg.DILITHIUM_K):
+            z_tasks = [
+                {"op": "fwd", "src_kind": "z", "poly": col, "dst": "z_ntt"}
+                for col in range(self.cfg.DILITHIUM_L)
+            ]
 
-        # Row 1..K-1
-        for row in range(1, self.cfg.DILITHIUM_K):
-            plan.extend([
-                {"op": "fwd", "src_kind": "z",  "poly": 0, "dst": "z_ntt"},
-                {"op": "inv", "src_kind": "w",  "row": row - 1, "dst": "w_final"},
-                {"op": "fwd", "src_kind": "z",  "poly": 1, "dst": "z_ntt"},
-                {"op": "fwd", "src_kind": "t1", "poly": row, "dst": "t1_ntt"},
-                {"op": "fwd", "src_kind": "z",  "poly": 2, "dst": "z_ntt"},
-                {"op": "fwd", "src_kind": "z",  "poly": 3, "dst": "z_ntt"},
-            ])
+            extra_tasks = []
+            if row == 0:
+                extra_tasks.append({"op": "fwd", "src_kind": "c", "poly": None, "dst": "c_ntt"})
+            else:
+                extra_tasks.append({"op": "inv", "src_kind": "w", "row": row - 1, "dst": "w_final"})
+
+            extra_tasks.append({"op": "fwd", "src_kind": "t1", "poly": row, "dst": "t1_ntt"})
+
+            plan.extend(self._interleave_row_ntt_tasks(z_tasks, extra_tasks))
 
         # Final inverse NTT
         plan.append({"op": "inv", "src_kind": "w", "row": self.cfg.DILITHIUM_K - 1, "dst": "w_final"})
@@ -252,6 +269,14 @@ class DilithiumScheduler:
     # ------------------------------------------------------------------
     # NTT issue
     # ------------------------------------------------------------------
+    def _z_ntt_blocked_by_pau(self) -> bool:
+        if not getattr(self.cfg, "PAU_HOLD_Z_BUFFER_UNTIL_DONE", False):
+            return False
+        if not self.sim.pau.busy:
+            return False
+        job = self.sim.pau.current_job or {}
+        return job.get("op") in {"mac_add_first", "mac_add_acc"}
+
     def _issue_ntt(self):
         if self.sim.ntt.busy:
             return
@@ -266,6 +291,8 @@ class DilithiumScheduler:
                 return
 
             if task["src_kind"] == "c" and not self.c_ready:
+                return
+            if task["src_kind"] == "z" and self._z_ntt_blocked_by_pau():
                 return
 
             tag = {
@@ -706,3 +733,51 @@ class DilithiumScheduler:
             if tag == "c_prime":
                 self.final_hash_done = True
                 self._trace("complete FINAL_HASH | c_prime ready")
+
+
+class Dilithium2Scheduler(DilithiumScheduler):
+    """
+    Scheduler preset for Dilithium2 (K=4, L=4).
+    """
+    EXPECTED_K = 4
+    EXPECTED_L = 4
+
+    def __init__(self, sim):
+        super().__init__(sim)
+        if self.cfg.DILITHIUM_K != self.EXPECTED_K or self.cfg.DILITHIUM_L != self.EXPECTED_L:
+            raise ValueError(
+                f"Dilithium2Scheduler expects K={self.EXPECTED_K}, L={self.EXPECTED_L}, "
+                f"got K={self.cfg.DILITHIUM_K}, L={self.cfg.DILITHIUM_L}"
+            )
+
+
+class Dilithium3Scheduler(DilithiumScheduler):
+    """
+    Scheduler preset for Dilithium3 (K=6, L=5).
+    """
+    EXPECTED_K = 6
+    EXPECTED_L = 5
+
+    def __init__(self, sim):
+        super().__init__(sim)
+        if self.cfg.DILITHIUM_K != self.EXPECTED_K or self.cfg.DILITHIUM_L != self.EXPECTED_L:
+            raise ValueError(
+                f"Dilithium3Scheduler expects K={self.EXPECTED_K}, L={self.EXPECTED_L}, "
+                f"got K={self.cfg.DILITHIUM_K}, L={self.cfg.DILITHIUM_L}"
+            )
+
+
+class Dilithium5Scheduler(DilithiumScheduler):
+    """
+    Scheduler preset for Dilithium5 (K=8, L=7).
+    """
+    EXPECTED_K = 8
+    EXPECTED_L = 7
+
+    def __init__(self, sim):
+        super().__init__(sim)
+        if self.cfg.DILITHIUM_K != self.EXPECTED_K or self.cfg.DILITHIUM_L != self.EXPECTED_L:
+            raise ValueError(
+                f"Dilithium5Scheduler expects K={self.EXPECTED_K}, L={self.EXPECTED_L}, "
+                f"got K={self.cfg.DILITHIUM_K}, L={self.cfg.DILITHIUM_L}"
+            )
